@@ -1,0 +1,214 @@
+#!/usr/bin/env bash
+
+
+# primer for an fzf_ctrl_t file preview, but can be aliased as well.
+# im aware of weird behaviour and artifacts in the outout, trying to
+# get rid of ASAP
+
+# this is written in bash, exept for w3mimagedisplay, the imagemagick
+# modules 'identify' and 'convert'. Also xprop is used as a 
+# workaround because fzf doesn't handle escape sequences so well.
+
+# Here i want to say my thanks to dylanaraps, his projects
+# 'neofetch' (https://github.com/dylanaraps/neofetch) and
+# 'pure bash bible'(https://github.com/dylanaraps/pure-bash-bible), 
+# which both were a great inspiration for me during writing this, 
+# you should go and check it out.
+
+# Last but not least, go and have a look at junegunn's fzf 'fuzzy
+# finder' (https://github.com/junegunn/fzf) and his other projects,
+# because they make your terminal life a joy! 
+
+
+getPath() {
+    
+    # find absolute path of input
+    full_path=($(pwd)/"${1}")
+
+    [[ -e "$full_path" ]] && \
+        printf '%s\n' "$full_path"
+}
+
+getFiletype() {
+
+    # test input against some extensions/builtin file types
+    if [[ "$1" == *.jpg ]] \
+        || [[ "$1" == *.JPG ]] \
+        || [[ "$1" == *.jpeg ]] \
+        || [[ "$1" == *.gif ]] \
+        || [[ "$1" == *.png ]]; then
+            img_type="$1"
+    elif [[ "$1" == *.pdf ]]; then
+        pdf_type="$1"
+    elif [[ -f "$1" ]]; then
+        reg_type="$1"
+    elif [[ -d "$1" ]]; then
+        dir_type="$1"
+    else
+        echo 'error:Filetype not supported'
+        exit 1
+    fi
+}
+
+getW3mPath() {
+    
+    # find w3mimagedisplay path.
+    shopt -s nullglob
+    w3m_paths=({/usr/{local/,},~/.nix-profile/}{lib,libexec,lib64,libexec64}/w3m/w3mi*)
+    shopt -u nullglob
+
+    [[ -x "${w3m_paths[0]}" ]] && \
+        { w3m_img_path="${w3m_paths[0]}"; return; }
+
+}
+
+getImageSource() {
+
+  image="$(getPath "$img_type")"
+
+}
+
+getWindowSize() {
+    
+    # not tested in tmux yet, but will soon follow
+    printf '%b' '\e[14t'
+    case "${BASH_VERSINFO[0]}" in
+        4|5) IFS=';t' read -d t -t 0.05 -sra term_size
+            ;;
+        *)   IFS=';t' read -d t -t 1 -sra term_size 
+            ;;
+    esac
+    unset IFS
+    win_height="${term_size[1]}"
+    win_width="${term_size[2]}"
+
+    # in case \e[14t does not work...
+
+    if [[ ! "$win_height" ]]; then
+        if type -p xprop &>/dev/null; then
+            current_window="$(xprop -root _NET_ACTIVE_WINDOW)"
+            current_window="${current_window#*# }"
+        fi
+        
+
+        if [[ "$current_window" ]]; then
+            win_size="$(xwininfo -id "$current_window")"
+            win_width="${win_size#*Width: }"
+            win_width="${win_width/$'\n'*}"
+            win_height="${win_size/*Height: }"
+            win_height="${win_height/$'\n'*}"
+        fi
+        
+    fi
+
+    
+    
+}
+
+getImageSize () {
+
+    read -r og_width og_height <<< "$(identify -format "%w %h" "$image")"
+    
+}
+
+
+
+makeThumbnail() {
+        
+    # make shure there is a thumbnail directory
+    mkdir -p "${thumbnail_dir:=${XDG_CACHE_HOME:-${HOME}/.cache}/thumbnails/thumbraider}"
+    # test for earlier conversion, if not, do the magic
+    if [[ ! -f "${thumbnail_dir}/${image_name}" ]]; then
+    # vaules are chosen arbitrarily, the awk -> printf '%i' part makes shure
+    # the geometry of the generated thumbnail is preserved
+        if [ "$win_width" -gt "$win_height" ]; then
+            local win_y="$win_height"
+            local img_y="$og_height"
+            if [ "$img_y" -gt "$win_y" ]; then
+                new_height="$(( $win_y / 2 ))" 
+                new_width="$( awk "BEGIN {print $og_width/$og_height*$new_height}" )"
+                new_width="$(printf '%i' "$new_width" 2>/dev/null)"
+            else
+                new_height="$og_height"
+                new_width="$og_width"
+            fi
+        else
+            local win_x="$win_width"
+            local img_x="$og_width"
+            if [ "$img_x" -gt "$win_x" ]; then
+                new_width="$(( $win_x / 2 ))"
+                new_height="$( awk "BEGIN {print $og_height/$og_width*$new_width}" )"
+                new_height="$(printf '%i' "$new_height" 2>/dev/null)"
+            else
+                new_width="$og_width"
+                new_height="$og_height"
+            fi
+        fi
+    x_off="$(( $win_width / 2 - $new_width / 2 ))"
+    y_off="$(( $win_height / 10 ))"
+    
+    image_name="${new_width}-${new_height}-${image##*/}"
+
+    convert "$image" \
+        -scale "${new_width}x${new_height}"\
+        "${thumbnail_dir}/${image_name}"
+
+        image="${thumbnail_dir}/${image_name}"
+
+    fi
+
+
+}
+
+showImage() {
+
+    # print image to stout using w3mimagedisplay
+    # sleep fixes the image dissapearing in xfce4-terminal
+    getW3mPath
+    printf '%b\n%s;\n%s;\n' "0;1;$x_off;$y_off;0;0;0;0;0;0;$image" 3 4 |\
+        "$w3m_img_path" &>/dev/null 
+    sleep 3s
+    # going to programmer hell for this...
+    # tried breaking a while loop at keypress and little 
+    # ascii-plumes were coming out of the terminal
+    
+}
+
+
+showFile () {
+
+    # one could ansi-color the output, works in fzf    
+    [[ ! -z "$pdf_type" ]] && less "$pdf_type"
+    [[ ! -z "$reg_type" ]] && head -n 100 "$reg_type"
+    [[ ! -z "$dir_type" ]] && tree -C "$dir_type"
+
+    return 0
+
+}
+
+imageBackend() {
+
+
+    [[ ! -z "$img_type" ]] \
+        && getImageSource \
+        && getImageSize \
+        && getWindowSize \
+        && makeThumbnail \
+        && showImage &> /dev/null
+
+    return 0
+}
+
+
+
+
+main() {
+
+    getFiletype "$1"
+    imageBackend
+    showFile
+        
+}
+
+main "$1"
+
